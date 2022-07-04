@@ -4,7 +4,7 @@ from torch import nn
 import pandas as pd
 from sklearn.metrics import roc_auc_score
 from src.generate_data import generate_semi_synthetic, generate_synth_censoring, onehot
-
+import matplotlib.pyplot as plt
 class DNMC(nn.Module):
     def __init__(
         self,
@@ -165,7 +165,7 @@ class DNMC(nn.Module):
                 return self.e_pred, self.t_pred, self.c_pred
             else:
                 if self.include_psi:
-                    self.c_pred = self.c_model(torch.cat([self.psi, self.omega], dim = -1))
+                    self.c_pred = self.c_model(torch.cat([self.psi, self.omega], dim=-1))
                 else:
                     self.c_pred = self.c_model(self.omega)
                 return self.e_pred, self.t_pred, self.c_pred
@@ -188,7 +188,8 @@ class DNMC(nn.Module):
         l = nll + self.ld * torch.tensor(self.mmd(self.omega_model(x), s), dtype=torch.float32)
 
         # Global L2 regularizer
-        l += torch.sum(self.losses)
+        for param in self.parameters():
+            l += self.lr * param.norm(2)
 
         # MTLR L2 regularizer
         if self.mtlr_head:
@@ -239,8 +240,8 @@ class DNMC(nn.Module):
         if beta is None:
             beta = get_median(torch.sum((x[:, None, :] - x[None, :, :]) ** 2, dim=-1))
 
-        x0 = x[torch.tensor(s == 0)]
-        x1 = x[torch.tensor(s == 1)]
+        x0 = x[s == 0]
+        x1 = x[s == 1]
 
         x0x0 = self._gaussian_kernel(x0, x0, beta)
         x0x1 = self._gaussian_kernel(x0, x1, beta)
@@ -259,21 +260,7 @@ def train_model(
         model, train_data, val_data, n_epochs,
         batch_size=50, learning_rate=1e-3, early_stopping_criterion=2,
         overwrite_output=True):
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=model.lr)
-
-    # @tf.function
-    def train_step(x, y, s):
-        # with tf.GradientTape() as tape:
-        train_loss, train_nll = model.loss(x, y, s)
-            # print(train_loss, train_nll)
-        # grads = tape.gradient(train_loss, model.trainable_weights)
-        # optimizer.apply_gradients(zip(grads, model.trainable_weights))
-        return train_loss, train_nll
-
-    # @tf.function
-    def test_step(x, y, s):
-        val_loss, val_nll = model.loss(x, y, s)
-        return val_loss, val_nll
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
     best_val_loss = np.inf
     no_decrease = 0
@@ -286,9 +273,10 @@ def train_model(
         for batch_idx, (xt, yt, st) in enumerate(get_batches(*train_data, batch_size=batch_size)):
             optimizer.zero_grad()
             train_loss, train_nll = model.loss(xt, yt, st)
+
             # for param in model.parameters():
-            #     train_loss += model.lr*param.square().sum()
-            # print(train_loss)
+            #     train_loss += model.lr*param.norm(2)
+
             train_loss.backward()
             optimizer.step()
             train_losses.append(train_loss)
@@ -367,15 +355,27 @@ X = X.values
 print('There are', X.shape[1], 'features')
 
 N_BINS = 10
+
+t = df['SURVIVAL'].values
+s = (df['CENSORED'] == 0).astype(int).values
+
+BIN_LENGTH = (np.amax(t) * 1.0001 - np.amin(t)) / N_BINS
+
+
+
 synth = generate_semi_synthetic(X, 10, 10, N_BINS, 1999)
 
 x_train, x_val, x_test = X[:1500], X[1500:1900], X[1900:]
 
-y = onehot(synth['y_disc'], ncategories=10)
-y_train, y_val, y_test = y[:1500], y[1500:1900], y[1900:]
+# y = onehot(synth['y_disc'], ncategories=10)
+# y_train, y_val, y_test = y[:1500], y[1500:1900], y[1900:]
+# s_train, s_val, s_test = synth['s'][:1500], synth['s'][1500:1900], synth['s'][1900:]
+# e_train, e_val, e_test = synth['e'][:1500], synth['e'][1500:1900], synth['e'][1900:]
 
-s_train, s_val, s_test = synth['s'][:1500], synth['s'][1500:1900], synth['s'][1900:]
-e_train, e_val, e_test = synth['e'][:1500], synth['e'][1500:1900], synth['e'][1900:]
+y_idx = (t - np.amin(t)) // BIN_LENGTH
+y = onehot(y_idx, ncategories=10)
+s_train, s_val, s_test = s[:1500], s[1500:1900], s[1900:]
+y_train, y_val, y_test = y[:1500], y[1500:1900], y[1900:]
 
 x_train = torch.tensor(x_train, dtype=torch.float32, requires_grad=True)
 y_train = torch.tensor(y_train, dtype=torch.float32, requires_grad=True)
@@ -390,10 +390,60 @@ train_model(
     model, (x_train, y_train, s_train), (x_val, y_val, s_val),
     300, learning_rate=1e-3)
 
+# average probability histagram, c-index,
 
-
+model.call(x_train)
 train_loss, train_nll = model.loss(x_train, y_train, s_train)
 e_pred, t_pred, c_pred = model.forward_pass(torch.tensor(x_test, dtype=torch.float32))
 torch.tensor(model.loss(x_train, y_train, s_train)).backward(retain_graph=True)
 
 roc_auc_score(e_test,  e_pred.detach().numpy())
+pd.DataFrame(X).to_csv("data.csv")
+
+
+for par in model.parameters():
+    print(par.norm(2))
+
+t_pred_df = pd.DataFrame(t_pred.detach().numpy()).mean()
+
+t_pred_df.plot.bar()
+plt.show()
+
+pd.DataFrame(y_test).sum()
+
+def discrete_ci(st, tt, tp):
+
+    s_true = np.array(st).copy()
+    t_true = np.array(tt).copy()
+    t_pred = np.array(tp).copy()
+
+    t_true_idx = np.argmax(t_true, axis=1)
+    t_pred_cdf = np.cumsum(t_pred, axis=1)
+
+    concordant = 0
+    total = 0
+
+    N = len(s_true)
+    idx = np.arange(N)
+
+    for i in range(N):
+
+        if s_true[i] == 0:
+            continue
+
+        # time bucket of observation for i, then for all but i
+        tti_idx = t_true_idx[i]
+        tt_idx = t_true_idx[idx != i]
+
+        # calculate predicted risk for i at the time of their event
+        tpi = t_pred_cdf[i, tti_idx]
+
+        # predicted risk at that time for all but i
+        tp = t_pred_cdf[idx != i, tti_idx]
+
+        total += np.sum(tti_idx < tt_idx) # observed in i first
+        concordant += np.sum((tti_idx < tt_idx) * (tpi > tp)) # and i predicted as higher risk
+
+    return concordant / total
+
+discrete_ci(s_test, y_test, t_pred.detach().numpy())
