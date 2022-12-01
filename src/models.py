@@ -185,7 +185,7 @@ class DNMC(nn.Module):
 
         # MMD Term
         # l = nll + self.ld * tf.cast(self.mmd(x, s), dtype=tf.float32)
-        l = nll + self.ld * torch.tensor(self.mmd(self.omega_model(x), s), dtype=torch.float32)
+        l = nll + self.ld * self.mmd(self.omega_model(x), s)
 
         # Global L2 regularizer
         for param in self.parameters():
@@ -341,109 +341,3 @@ def get_batches(*arrs, batch_size=1):
     l = len(arrs[0])
     for ndx in range(0, l, batch_size):
         yield (arr[ndx:min(ndx + batch_size, l)] for arr in arrs)
-
-df = pd.read_csv('http://pssp.srv.ualberta.ca/system/predictors/datasets/000/000/032/original/All_Data_updated_may2011_CLEANED.csv?1350302245')
-numrc_cols = df.nunique() > 2
-df.loc[:, numrc_cols] = (df.loc[:, numrc_cols] - df.loc[:, numrc_cols].mean()) / df.loc[:, numrc_cols].std()
-
-df['CENSORED'].value_counts()
-
-OUTCOMES = ['SURVIVAL', 'CENSORED']
-X = df.drop(OUTCOMES, axis=1).sample(frac=1, random_state=2021)
-X = X.values
-
-print('There are', X.shape[1], 'features')
-
-N_BINS = 10
-
-t = df['SURVIVAL'].values
-s = (df['CENSORED'] == 0).astype(int).values
-
-BIN_LENGTH = (np.amax(t) * 1.0001 - np.amin(t)) / N_BINS
-
-
-
-synth = generate_semi_synthetic(X, 10, 10, N_BINS, 1999)
-
-x_train, x_val, x_test = X[:1500], X[1500:1900], X[1900:]
-
-# y = onehot(synth['y_disc'], ncategories=10)
-# y_train, y_val, y_test = y[:1500], y[1500:1900], y[1900:]
-# s_train, s_val, s_test = synth['s'][:1500], synth['s'][1500:1900], synth['s'][1900:]
-# e_train, e_val, e_test = synth['e'][:1500], synth['e'][1500:1900], synth['e'][1900:]
-
-y_idx = (t - np.amin(t)) // BIN_LENGTH
-y = onehot(y_idx, ncategories=10)
-s_train, s_val, s_test = s[:1500], s[1500:1900], s[1900:]
-y_train, y_val, y_test = y[:1500], y[1500:1900], y[1900:]
-
-x_train = torch.tensor(x_train, dtype=torch.float32, requires_grad=True)
-y_train = torch.tensor(y_train, dtype=torch.float32, requires_grad=True)
-s_train = torch.tensor(s_train, dtype=torch.float32, requires_grad=True)
-
-x_val = torch.tensor(x_val, dtype=torch.float32, requires_grad=True)
-y_val = torch.tensor(y_val, dtype=torch.float32, requires_grad=True)
-s_val = torch.tensor(s_val, dtype=torch.float32, requires_grad=True)
-
-model = DNMC(n_bins=N_BINS, lr=.03, ld=10.)
-train_model(
-    model, (x_train, y_train, s_train), (x_val, y_val, s_val),
-    300, learning_rate=1e-3)
-
-# average probability histagram, c-index,
-
-model.call(x_train)
-train_loss, train_nll = model.loss(x_train, y_train, s_train)
-e_pred, t_pred, c_pred = model.forward_pass(torch.tensor(x_test, dtype=torch.float32))
-torch.tensor(model.loss(x_train, y_train, s_train)).backward(retain_graph=True)
-
-roc_auc_score(e_test,  e_pred.detach().numpy())
-pd.DataFrame(X).to_csv("data.csv")
-
-
-for par in model.parameters():
-    print(par.norm(2))
-
-t_pred_df = pd.DataFrame(t_pred.detach().numpy()).mean()
-
-t_pred_df.plot.bar()
-plt.show()
-
-pd.DataFrame(y_test).sum()
-
-def discrete_ci(st, tt, tp):
-
-    s_true = np.array(st).copy()
-    t_true = np.array(tt).copy()
-    t_pred = np.array(tp).copy()
-
-    t_true_idx = np.argmax(t_true, axis=1)
-    t_pred_cdf = np.cumsum(t_pred, axis=1)
-
-    concordant = 0
-    total = 0
-
-    N = len(s_true)
-    idx = np.arange(N)
-
-    for i in range(N):
-
-        if s_true[i] == 0:
-            continue
-
-        # time bucket of observation for i, then for all but i
-        tti_idx = t_true_idx[i]
-        tt_idx = t_true_idx[idx != i]
-
-        # calculate predicted risk for i at the time of their event
-        tpi = t_pred_cdf[i, tti_idx]
-
-        # predicted risk at that time for all but i
-        tp = t_pred_cdf[idx != i, tti_idx]
-
-        total += np.sum(tti_idx < tt_idx) # observed in i first
-        concordant += np.sum((tti_idx < tt_idx) * (tpi > tp)) # and i predicted as higher risk
-
-    return concordant / total
-
-discrete_ci(s_test, y_test, t_pred.detach().numpy())
